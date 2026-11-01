@@ -64,6 +64,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         window.backgroundColor = Palette.chrome
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        Self.clearInvalidSavedFrame(for: window)
         window.center()
         window.setFrameAutosaveName("PDFViewerWindow")
         super.init(window: window)
@@ -75,6 +76,24 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    private static func clearInvalidSavedFrame(for window: NSWindow) {
+        let key = "NSWindow Frame PDFViewerWindow"
+        guard let value = UserDefaults.standard.string(forKey: key) else { return }
+        let numbers = value.split(whereSeparator: \.isWhitespace).prefix(4).compactMap { Double($0) }
+        guard numbers.count == 4 else {
+            UserDefaults.standard.removeObject(forKey: key)
+            return
+        }
+        let frame = NSRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
+        let sufficientlyVisible = NSScreen.screens.isEmpty || NSScreen.screens.contains { screen in
+            let overlap = frame.intersection(screen.visibleFrame)
+            return overlap.width >= 320 && overlap.height >= 240
+        }
+        if frame.width < window.minSize.width || frame.height < window.minSize.height || !sufficientlyVisible {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
 
     func windowWillClose(_ notification: Notification) {
         observations.forEach(NotificationCenter.default.removeObserver)
@@ -226,6 +245,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         root.wantsLayer = true
         root.layer?.backgroundColor = Palette.chrome.cgColor
         window.contentView = root
+        root.widthAnchor.constraint(greaterThanOrEqualToConstant: 680).isActive = true
 
         let titleBar = ChromeBarView(draggable: true)
         titleBar.translatesAutoresizingMaskIntoConstraints = false
@@ -237,11 +257,6 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         titleContent.spacing = 7
         titleContent.translatesAutoresizingMaskIntoConstraints = false
         titleBar.addSubview(titleContent)
-        let appIcon = NSImageView(image: NSImage(contentsOfFile: Bundle.main.path(forResource: "pdf-viewer", ofType: "png") ?? "") ?? NSImage())
-        appIcon.imageScaling = .scaleProportionallyUpOrDown
-        appIcon.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        appIcon.heightAnchor.constraint(equalToConstant: 18).isActive = true
-        titleContent.addArrangedSubview(appIcon)
         let brand = NSTextField(labelWithString: "pdf-viewer")
         brand.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
         brand.textColor = NSColor(white: 0.88, alpha: 1)
@@ -337,12 +352,13 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         tabStrip.documentView = tabStripContent
         tabBar.addSubview(tabStrip)
         let tabListButton = toolButton("All Open Documents", symbol: "chevron.down", action: #selector(showTabMenu(_:)), width: 29)
+        tabListButton.translatesAutoresizingMaskIntoConstraints = false
         tabBar.addSubview(tabListButton)
         NSLayoutConstraint.activate([
             tabStrip.topAnchor.constraint(equalTo: tabBar.topAnchor),
             tabStrip.bottomAnchor.constraint(equalTo: tabBar.bottomAnchor),
             tabStrip.leadingAnchor.constraint(equalTo: tabBar.leadingAnchor),
-            tabStrip.trailingAnchor.constraint(equalTo: tabListButton.leadingAnchor, constant: -4),
+            tabStrip.widthAnchor.constraint(equalTo: tabBar.widthAnchor, constant: -39),
             tabListButton.trailingAnchor.constraint(equalTo: tabBar.trailingAnchor, constant: -6),
             tabListButton.centerYAnchor.constraint(equalTo: tabBar.centerYAnchor)
         ])

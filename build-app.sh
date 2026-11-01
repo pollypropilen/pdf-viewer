@@ -44,6 +44,7 @@ xcrun swiftc -O -swift-version 6 -target "$(uname -m)-apple-macos13.0" \
   "$vendor/install/lib/libdjvulibre.a" -lc++ -lz -liconv \
   -o "$app/Contents/MacOS/PDFViewer"
 cp Resources/pdf-viewer.png "$app/Contents/Resources/pdf-viewer.png"
+cp Resources/pdf-viewer.icns "$app/Contents/Resources/pdf-viewer.icns"
 cp Resources/chrome-grain.png "$app/Contents/Resources/chrome-grain.png"
 cp "$vendor/djvulibre-3.5.30/COPYING" "$app/Contents/Resources/DjVuLibre-COPYING"
 cp LICENSE "$app/Contents/Resources/PDFViewer-COPYING"

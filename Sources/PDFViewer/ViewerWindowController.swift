@@ -12,7 +12,9 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
     }
 
     var onClose: (() -> Void)?
-    private(set) var documentURL: URL?
+    var documentURL: URL? { activeTabIndex.flatMap { tabs.indices.contains($0) ? tabs[$0].url : nil } }
+    private var tabs: [DocumentTab] = []
+    private var activeTabIndex: Int?
     private var pdfDocument: PDFDocument?
     private var djvuDocument: DjVuDocument?
     private var djvuOutlineRoot: PDFOutline?
@@ -23,6 +25,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
     private let outlineView = NSOutlineView()
     private let sidebar = NSView()
     private let splitView = NSSplitView()
+    private let tabBar = NSView()
+    private let tabStrip = NSScrollView()
+    private let tabStripContent = NSView()
+    private var tabStripHeight: NSLayoutConstraint?
     private let sidebarMode = NSSegmentedControl(labels: ["Pages", "Outline"], trackingMode: .selectOne, target: nil, action: nil)
     private let pageField = NSTextField(string: "")
     private let pageCountLabel = NSTextField(labelWithString: "")
@@ -40,6 +46,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
     private var twoPageToolButton: ChromeIconButton?
     private var pagesToolButton: ChromeIconButton?
     private var outlineToolButton: ChromeIconButton?
+    private var printToolButton: ChromeIconButton?
     private var matches: [PDFSelection] = []
     private var djvuMatches: [Int] = []
     private var matchIndex = 0
@@ -77,6 +84,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
     }
 
     func loadDocument(_ url: URL) {
+        if let index = tabs.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
+            selectTab(at: index)
+            return
+        }
         let isDjVu = ["djvu", "djv"].contains(url.pathExtension.lowercased())
         let djvu = isDjVu ? DjVuDocument(url: url) : nil
         guard let pdf = isDjVu ? djvu?.makePDFDocument() : PDFDocument(url: url) else {
@@ -93,29 +104,119 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
             showError("Document has no pages: \(url.lastPathComponent)")
             return
         }
-        documentURL = url
-        djvuDocument = djvu
-        djvuOutlineRoot = djvu?.makeOutline(for: pdf)
-        pdfDocument = pdf
-        pdfView.document = pdf
+        let tab = DocumentTab(url: url, pdf: pdf, djvu: djvu, outline: djvu?.makeOutline(for: pdf))
+        tabs.append(tab)
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        selectTab(at: tabs.count - 1)
+    }
+
+    func containsDocument(_ url: URL) -> Bool {
+        tabs.contains { $0.url.standardizedFileURL == url.standardizedFileURL }
+    }
+
+    func selectDocument(_ url: URL) {
+        if let index = tabs.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
+            selectTab(at: index)
+        }
+    }
+
+    private func saveActiveTabState() {
+        guard let index = activeTabIndex, tabs.indices.contains(index) else { return }
+        let tab = tabs[index]
+        if let page = visiblePage { tab.pageIndex = tab.pdf.index(for: page) }
+        tab.scale = pdfView.scaleFactor
+        tab.displayMode = displayModeControl.selectedSegment
+        tab.sidebarMode = sidebarMode.selectedSegment
+        tab.sidebarHidden = sidebar.isHidden
+        tab.searchQuery = searchField.stringValue
+        tab.matches = matches
+        tab.djvuMatches = djvuMatches
+        tab.matchIndex = matchIndex
+        tab.lastQuery = lastQuery
+    }
+
+    private func selectTab(at index: Int) {
+        guard tabs.indices.contains(index) else { return }
+        if activeTabIndex == index { return }
+        saveActiveTabState()
+        searchPopover.close()
+        activeTabIndex = index
+        let tab = tabs[index]
+        pdfDocument = tab.pdf
+        djvuDocument = tab.djvu
+        djvuOutlineRoot = tab.outline
+        pdfView.document = tab.pdf
         pdfView.autoScales = false
-        observeScroll()
-        thumbnailView.pdfView = djvu == nil ? pdfView : nil
+        pdfView.displayMode = tab.displayMode == 1 ? .twoUpContinuous : .singlePageContinuous
+        displayModeControl.selectedSegment = tab.displayMode
+        continuousToolButton?.isSelected = tab.displayMode == 0
+        twoPageToolButton?.isSelected = tab.displayMode == 1
+        thumbnailView.pdfView = tab.djvu == nil ? pdfView : nil
         djvuThumbnailView.reloadData()
         outlineView.reloadData()
-        sidebarMode.setEnabled(activeOutlineRoot?.numberOfChildren ?? 0 > 0, forSegment: 1)
-        if sidebarMode.selectedSegment == 1 && !sidebarMode.isEnabled(forSegment: 1) {
-            sidebarMode.selectedSegment = 0
-        }
+        let hasOutline = (activeOutlineRoot?.numberOfChildren ?? 0) > 0
+        sidebarMode.setEnabled(hasOutline, forSegment: 1)
+        outlineToolButton?.isEnabled = hasOutline
+        printToolButton?.isEnabled = tab.djvu == nil
+        sidebarMode.selectedSegment = hasOutline ? tab.sidebarMode : 0
+        sidebar.isHidden = tab.sidebarHidden
         changeSidebarMode(nil)
+        searchField.stringValue = tab.searchQuery
+        matches = tab.matches
+        djvuMatches = tab.djvuMatches
+        matchIndex = tab.matchIndex
+        lastQuery = tab.lastQuery
+        pdfView.highlightedSelections = tab.matches.isEmpty ? nil : tab.matches
+        let matchCount = tab.djvu == nil ? tab.matches.count : tab.djvuMatches.count
+        searchCountLabel.stringValue = matchCount == 0 ? "" : "\(tab.matchIndex + 1)/\(matchCount)\(tab.djvu == nil ? "" : " pages")"
         emptyLabel.isHidden = true
-        window?.title = url.lastPathComponent
-        window?.representedURL = url
-        documentTabLabel.stringValue = url.lastPathComponent
-        NSDocumentController.shared.noteNewRecentDocumentURL(url)
-        clearSearch()
+        window?.title = tab.url.lastPathComponent
+        window?.representedURL = tab.url
+        documentTabLabel.stringValue = tab.url.lastPathComponent
+        if let page = tab.pdf.page(at: tab.pageIndex) { pdfView.go(to: page) }
+        if let scale = tab.scale { pdfView.scaleFactor = scale }
+        observeScroll()
         refreshStatus()
-        DispatchQueue.main.async { [weak self] in self?.fitPage(nil) }
+        renderTabs()
+        if tab.scale == nil {
+            DispatchQueue.main.async { [weak self, weak tab] in
+                guard let self, let tab, self.activeTabIndex.flatMap({ self.tabs.indices.contains($0) ? self.tabs[$0] : nil }) === tab else { return }
+                self.fitPage(nil)
+                tab.scale = self.pdfView.scaleFactor
+            }
+        }
+    }
+
+    private func closeTab(at index: Int) {
+        guard tabs.indices.contains(index) else { return }
+        if index == activeTabIndex { searchPopover.close() }
+        tabs.remove(at: index)
+        if tabs.isEmpty {
+            activeTabIndex = nil
+            pdfDocument = nil
+            djvuDocument = nil
+            djvuOutlineRoot = nil
+            pdfView.document = nil
+            thumbnailView.pdfView = nil
+            djvuThumbnailView.reloadData()
+            outlineView.reloadData()
+            window?.title = "pdf-viewer"
+            window?.representedURL = nil
+            documentTabLabel.stringValue = "No document"
+            emptyLabel.isHidden = false
+            printToolButton?.isEnabled = false
+            outlineToolButton?.isEnabled = false
+            searchField.stringValue = ""
+            clearSearch()
+            refreshStatus()
+            renderTabs()
+        } else if index == activeTabIndex {
+            activeTabIndex = nil
+            selectTab(at: min(index, tabs.count - 1))
+        } else {
+            if let activeTabIndex, index < activeTabIndex { self.activeTabIndex = activeTabIndex - 1 }
+            renderTabs()
+        }
     }
 
     private func buildInterface() {
@@ -184,10 +285,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         ])
 
         leftTools.addArrangedSubview(toolButton("New Window", symbol: "doc", action: #selector(newWindow(_:))))
-        leftTools.addArrangedSubview(toolButton("Close Window", symbol: "xmark", action: #selector(closeCurrentWindow(_:))))
         leftTools.addArrangedSubview(toolButton("Open PDF or DjVu", symbol: "folder", action: #selector(openFile(_:))))
+        leftTools.addArrangedSubview(toolButton("Close Tab", symbol: "xmark", action: #selector(closeCurrentTab(_:))))
         leftTools.addArrangedSubview(toolButton("Recent Files", symbol: "chevron.down", action: #selector(showRecentFiles(_:)), width: 18))
-        leftTools.addArrangedSubview(toolButton("Print PDF", symbol: "printer", action: #selector(printDocument(_:))))
+        printToolButton = toolButton("Print PDF", symbol: "printer", action: #selector(printDocument(_:)))
+        printToolButton?.isEnabled = false
+        leftTools.addArrangedSubview(printToolButton!)
         leftTools.addArrangedSubview(toolbarSeparator())
         leftTools.addArrangedSubview(toolButton("Previous Page", symbol: "arrow.up", action: #selector(previousPage(_:))))
         leftTools.addArrangedSubview(toolButton("Next Page", symbol: "arrow.down", action: #selector(nextPage(_:))))
@@ -197,12 +300,14 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         leftTools.addArrangedSubview(toolButton("Fit Width", symbol: "arrow.left.and.right", action: #selector(fitWidth(_:))))
         leftTools.addArrangedSubview(toolButton("Fit Page", symbol: "arrow.up.left.and.arrow.down.right", action: #selector(fitPage(_:))))
 
-        let selectButton = toolButton("Select Text", symbol: "cursorarrow", action: #selector(focusDocument(_:)))
+        let selectButton = toolButton("Pointer", symbol: "cursorarrow", action: #selector(focusDocument(_:)))
+        selectButton.emphasized = true
         selectButton.isSelected = true
         rightTools.addArrangedSubview(selectButton)
         pagesToolButton = toolButton("Pages", symbol: "square.grid.2x2", action: #selector(showPages(_:)))
         rightTools.addArrangedSubview(pagesToolButton!)
         outlineToolButton = toolButton("Outline", symbol: "list.bullet.rectangle", action: #selector(showOutline(_:)))
+        outlineToolButton?.isEnabled = false
         rightTools.addArrangedSubview(outlineToolButton!)
         rightTools.addArrangedSubview(toolbarSeparator())
         continuousToolButton = toolButton("Continuous", symbol: "rectangle.stack", action: #selector(showContinuous(_:)))
@@ -216,6 +321,31 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         pagesToolButton?.isSelected = true
 
         buildSearchPopover()
+
+        tabBar.translatesAutoresizingMaskIntoConstraints = false
+        tabBar.wantsLayer = true
+        tabBar.isHidden = true
+        tabBar.layer?.backgroundColor = NSColor(srgbRed: 0.14, green: 0.145, blue: 0.15, alpha: 1).cgColor
+        root.addSubview(tabBar)
+        tabStrip.translatesAutoresizingMaskIntoConstraints = false
+        tabStrip.drawsBackground = true
+        tabStrip.backgroundColor = NSColor(srgbRed: 0.14, green: 0.145, blue: 0.15, alpha: 1)
+        tabStrip.hasHorizontalScroller = false
+        tabStrip.hasVerticalScroller = false
+        tabStrip.horizontalScrollElasticity = .allowed
+        tabStripContent.frame = NSRect(x: 0, y: 0, width: 100, height: 37)
+        tabStrip.documentView = tabStripContent
+        tabBar.addSubview(tabStrip)
+        let tabListButton = toolButton("All Open Documents", symbol: "chevron.down", action: #selector(showTabMenu(_:)), width: 29)
+        tabBar.addSubview(tabListButton)
+        NSLayoutConstraint.activate([
+            tabStrip.topAnchor.constraint(equalTo: tabBar.topAnchor),
+            tabStrip.bottomAnchor.constraint(equalTo: tabBar.bottomAnchor),
+            tabStrip.leadingAnchor.constraint(equalTo: tabBar.leadingAnchor),
+            tabStrip.trailingAnchor.constraint(equalTo: tabListButton.leadingAnchor, constant: -4),
+            tabListButton.trailingAnchor.constraint(equalTo: tabBar.trailingAnchor, constant: -6),
+            tabListButton.centerYAnchor.constraint(equalTo: tabBar.centerYAnchor)
+        ])
 
         let statusBar = NSStackView()
         statusBar.orientation = .horizontal
@@ -263,7 +393,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             toolbar.heightAnchor.constraint(equalToConstant: 33),
-            splitView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            tabBar.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            tabBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            tabBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            splitView.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             splitView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
@@ -272,6 +405,8 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
             statusBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             statusBar.heightAnchor.constraint(equalToConstant: 30)
         ])
+        tabStripHeight = tabBar.heightAnchor.constraint(equalToConstant: 0)
+        tabStripHeight?.isActive = true
 
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         sidebar.wantsLayer = true
@@ -361,37 +496,92 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         ])
     }
 
-    private func button(_ title: String, symbol: String?, action: Selector) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.isBordered = false
-        button.wantsLayer = true
-        button.layer?.backgroundColor = Palette.button.cgColor
-        button.layer?.cornerRadius = 5
-        button.contentTintColor = .white
-        button.attributedTitle = NSAttributedString(string: title, attributes: [
-            .foregroundColor: NSColor.white,
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium)
-        ])
-        button.heightAnchor.constraint(equalToConstant: 27).isActive = true
-        if let symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: title) {
-            button.image = image
-            button.imagePosition = title.count > 1 ? .imageLeading : .imageOnly
-            button.toolTip = title
+    private func renderTabs() {
+        tabBar.isHidden = tabs.isEmpty
+        tabStripHeight?.constant = tabs.isEmpty ? 0 : 37
+        tabStripContent.subviews.forEach { $0.removeFromSuperview() }
+        let width: CGFloat = 220
+        let gap: CGFloat = 4
+        for (index, tab) in tabs.enumerated() {
+            let item = DocumentTabView(title: tab.url.lastPathComponent, selected: index == activeTabIndex)
+            item.frame = NSRect(x: 5 + CGFloat(index) * (width + gap), y: 3, width: width, height: 31)
+            item.onSelect = { [weak self] in self?.selectTab(at: index) }
+            item.onClose = { [weak self] in self?.closeTab(at: index) }
+            tabStripContent.addSubview(item)
         }
+        let contentWidth = max(tabStrip.contentSize.width, 10 + CGFloat(tabs.count) * (width + gap))
+        tabStripContent.setFrameSize(NSSize(width: contentWidth, height: 37))
+        if let activeTabIndex, tabs.indices.contains(activeTabIndex) {
+            tabStripContent.scrollToVisible(tabStripContent.subviews[activeTabIndex].frame)
+        }
+    }
+
+    private func toolButton(_ title: String, symbol: String, action: Selector, width: CGFloat = 28) -> ChromeIconButton {
+        let button = ChromeIconButton(frame: .zero)
+        button.target = self
+        button.action = action
+        button.toolTip = title
+        button.setAccessibilityLabel(title)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+            ?? NSImage(systemSymbolName: "square", accessibilityDescription: title)
+        button.image = image?.withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 27).isActive = true
         return button
+    }
+
+    private func toolbarSeparator() -> NSView {
+        let slot = NSView()
+        let line = NSView()
+        line.wantsLayer = true
+        line.layer?.backgroundColor = NSColor(white: 0.45, alpha: 0.32).cgColor
+        line.translatesAutoresizingMaskIntoConstraints = false
+        slot.addSubview(line)
+        NSLayoutConstraint.activate([
+            slot.widthAnchor.constraint(equalToConstant: 10),
+            slot.heightAnchor.constraint(equalToConstant: 24),
+            line.widthAnchor.constraint(equalToConstant: 1),
+            line.heightAnchor.constraint(equalToConstant: 16),
+            line.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
+            line.centerYAnchor.constraint(equalTo: slot.centerYAnchor)
+        ])
+        return slot
+    }
+
+    private func buildSearchPopover() {
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 392, height: 46))
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 9),
+            row.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -9),
+            row.centerYAnchor.constraint(equalTo: content.centerYAnchor)
+        ])
+        searchField.placeholderString = "Search document"
+        searchField.target = self
+        searchField.action = #selector(runSearch(_:))
+        searchField.widthAnchor.constraint(equalToConstant: 212).isActive = true
+        row.addArrangedSubview(searchField)
+        searchCountLabel.textColor = Palette.secondary
+        searchCountLabel.font = .systemFont(ofSize: 11)
+        searchCountLabel.alignment = .center
+        searchCountLabel.widthAnchor.constraint(equalToConstant: 73).isActive = true
+        row.addArrangedSubview(searchCountLabel)
+        row.addArrangedSubview(toolButton("Previous Match", symbol: "chevron.up", action: #selector(previousMatch(_:)), width: 26))
+        row.addArrangedSubview(toolButton("Next Match", symbol: "chevron.down", action: #selector(nextMatch(_:)), width: 26))
+        let controller = NSViewController()
+        controller.view = content
+        searchPopover.contentViewController = controller
+        searchPopover.behavior = .transient
     }
 
     private func styleBar(_ bar: NSStackView, color: NSColor) {
         bar.wantsLayer = true
         bar.layer?.backgroundColor = color.cgColor
-    }
-
-    private func separator() -> NSBox {
-        let box = NSBox()
-        box.boxType = .separator
-        box.widthAnchor.constraint(equalToConstant: 1).isActive = true
-        box.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        return box
     }
 
     private func observePDFView() {
@@ -463,6 +653,74 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
 
     @objc func openFile(_ sender: Any?) { (NSApp.delegate as? AppDelegate)?.openDocument(sender) }
 
+    @objc func newWindow(_ sender: Any?) { (NSApp.delegate as? AppDelegate)?.showEmptyWindow() }
+
+    @objc func closeCurrentTab(_ sender: Any?) {
+        guard let activeTabIndex else { window?.performClose(sender); return }
+        closeTab(at: activeTabIndex)
+    }
+
+    @objc func closeCurrentWindow(_ sender: Any?) { window?.performClose(sender) }
+
+    @objc func selectNextTab(_ sender: Any?) {
+        guard let activeTabIndex, tabs.count > 1 else { return }
+        selectTab(at: (activeTabIndex + 1) % tabs.count)
+    }
+
+    @objc func selectPreviousTab(_ sender: Any?) {
+        guard let activeTabIndex, tabs.count > 1 else { return }
+        selectTab(at: (activeTabIndex - 1 + tabs.count) % tabs.count)
+    }
+
+    @objc private func showTabMenu(_ sender: Any?) {
+        guard let button = sender as? NSView, !tabs.isEmpty else { return }
+        let menu = NSMenu(title: "Open Documents")
+        let heading = menu.addItem(withTitle: "Open Documents (\(tabs.count))", action: nil, keyEquivalent: "")
+        heading.isEnabled = false
+        menu.addItem(.separator())
+        let filenameCounts = Dictionary(tabs.map { ($0.url.lastPathComponent, 1) }, uniquingKeysWith: +)
+        for (index, tab) in tabs.enumerated() {
+            let filename = tab.url.lastPathComponent
+            let title = filenameCounts[filename, default: 0] > 1
+                ? "\(filename) — \(tab.url.deletingLastPathComponent().lastPathComponent)"
+                : filename
+            let item = menu.addItem(withTitle: title, action: #selector(selectTabFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = index == activeTabIndex ? .on : .off
+            item.toolTip = tab.url.path
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY), in: button)
+    }
+
+    @objc private func selectTabFromMenu(_ sender: NSMenuItem) {
+        selectTab(at: sender.tag)
+    }
+
+    @objc func showRecentFiles(_ sender: Any?) {
+        guard let button = sender as? NSView else { return }
+        let menu = NSMenu()
+        let urls = NSDocumentController.shared.recentDocumentURLs.filter {
+            ["pdf", "djvu", "djv"].contains($0.pathExtension.lowercased())
+        }
+        if urls.isEmpty {
+            let item = menu.addItem(withTitle: "No Recent Files", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+        } else {
+            for url in urls.prefix(10) {
+                let item = menu.addItem(withTitle: url.lastPathComponent, action: #selector(openRecentFile(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = url
+            }
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.minY), in: button)
+    }
+
+    @objc private func openRecentFile(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        (NSApp.delegate as? AppDelegate)?.open(url)
+    }
+
     @objc func goToPage(_ sender: Any?) {
         guard let pdfDocument, let number = Int(pageField.stringValue),
               number >= 1, number <= pdfDocument.pageCount,
@@ -517,20 +775,53 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         sidebar.isHidden.toggle()
     }
 
+    @objc func focusDocument(_ sender: Any?) { window?.makeFirstResponder(pdfView) }
+
+    @objc func showPages(_ sender: Any?) {
+        sidebar.isHidden = false
+        sidebarMode.selectedSegment = 0
+        changeSidebarMode(sender)
+    }
+
+    @objc func showOutline(_ sender: Any?) {
+        guard sidebarMode.isEnabled(forSegment: 1) else { return }
+        sidebar.isHidden = false
+        sidebarMode.selectedSegment = 1
+        changeSidebarMode(sender)
+    }
+
+    @objc func showContinuous(_ sender: Any?) {
+        displayModeControl.selectedSegment = 0
+        changeDisplayMode(sender)
+    }
+
+    @objc func showTwoPage(_ sender: Any?) {
+        displayModeControl.selectedSegment = 1
+        changeDisplayMode(sender)
+    }
+
     @objc func changeSidebarMode(_ sender: Any?) {
         let outlines = sidebarMode.selectedSegment == 1
         sidebar.subviews.compactMap { $0 as? NSScrollView }.forEach { $0.isHidden = !outlines }
         thumbnailView.isHidden = outlines || djvuDocument != nil
         djvuThumbnailScroll.isHidden = outlines || djvuDocument == nil
+        pagesToolButton?.isSelected = !outlines
+        outlineToolButton?.isSelected = outlines
     }
 
     @objc func changeDisplayMode(_ sender: Any?) {
         pdfView.displayMode = displayModeControl.selectedSegment == 1 ? .twoUpContinuous : .singlePageContinuous
+        continuousToolButton?.isSelected = displayModeControl.selectedSegment == 0
+        twoPageToolButton?.isSelected = displayModeControl.selectedSegment == 1
         fitPage(sender)
     }
 
     @objc func focusSearch(_ sender: Any?) {
-        window?.makeFirstResponder(searchField)
+        guard let searchButton else { return }
+        if !searchPopover.isShown {
+            searchPopover.show(relativeTo: searchButton.bounds, of: searchButton, preferredEdge: .minY)
+        }
+        searchPopover.contentViewController?.view.window?.makeFirstResponder(searchField)
     }
 
     @objc func runSearch(_ sender: Any?) {
@@ -691,6 +982,159 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSOutl
         guard let page = pdfDocument?.page(at: djvuThumbnailView.selectedRow) else { return }
         pdfView.go(to: page)
         refreshStatus()
+    }
+}
+
+@MainActor
+private final class DocumentTab {
+    let url: URL
+    let pdf: PDFDocument
+    let djvu: DjVuDocument?
+    let outline: PDFOutline?
+    var pageIndex = 0
+    var scale: CGFloat?
+    var displayMode = 0
+    var sidebarMode = 0
+    var sidebarHidden = false
+    var searchQuery = ""
+    var matches: [PDFSelection] = []
+    var djvuMatches: [Int] = []
+    var matchIndex = 0
+    var lastQuery = ""
+
+    init(url: URL, pdf: PDFDocument, djvu: DjVuDocument?, outline: PDFOutline?) {
+        self.url = url
+        self.pdf = pdf
+        self.djvu = djvu
+        self.outline = outline
+    }
+}
+
+@MainActor
+private final class DocumentTabView: NSView {
+    var onSelect: (() -> Void)?
+    var onClose: (() -> Void)?
+    private let selected: Bool
+
+    init(title: String, selected: Bool) {
+        self.selected = selected
+        super.init(frame: .zero)
+        let label = NSTextField(labelWithString: title)
+        label.frame = NSRect(x: 12, y: 6, width: 172, height: 19)
+        label.font = .systemFont(ofSize: 12, weight: selected ? .semibold : .regular)
+        label.textColor = selected
+            ? NSColor(srgbRed: 1, green: 0.55, blue: 0.26, alpha: 1)
+            : NSColor(white: 0.85, alpha: 1)
+        label.lineBreakMode = .byTruncatingMiddle
+        addSubview(label)
+
+        let selectButton = NSButton(frame: NSRect(x: 0, y: 0, width: 188, height: 31))
+        selectButton.title = ""
+        selectButton.isBordered = false
+        selectButton.isTransparent = true
+        selectButton.target = self
+        selectButton.action = #selector(selectTab)
+        selectButton.setAccessibilityLabel(title)
+        selectButton.toolTip = title
+        addSubview(selectButton)
+
+        let closeButton = NSButton(frame: NSRect(x: 191, y: 3, width: 25, height: 25))
+        closeButton.title = ""
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close \(title)")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        closeButton.imagePosition = .imageOnly
+        closeButton.contentTintColor = NSColor(white: 0.80, alpha: 1)
+        closeButton.isBordered = false
+        closeButton.target = self
+        closeButton.action = #selector(closeTab)
+        closeButton.setAccessibilityLabel("Close \(title)")
+        closeButton.toolTip = "Close \(title)"
+        addSubview(closeButton)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+        (selected ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.23, alpha: 1)).setFill()
+        shape.fill()
+        NSColor(white: selected ? 0.45 : 0.12, alpha: 1).setStroke()
+        shape.lineWidth = 1
+        shape.stroke()
+    }
+
+    @objc private func selectTab(_ sender: Any?) { onSelect?() }
+    @objc private func closeTab(_ sender: Any?) { onClose?() }
+}
+
+@MainActor
+private final class ChromeBarView: NSView {
+    private static let grain = Bundle.main.path(forResource: "chrome-grain", ofType: "png").flatMap(NSImage.init(contentsOfFile:))
+    private let draggable: Bool
+
+    init(draggable: Bool) {
+        self.draggable = draggable
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(srgbRed: 0.088, green: 0.091, blue: 0.095, alpha: 1).setFill()
+        bounds.fill()
+        if let grain = Self.grain {
+            for x in stride(from: CGFloat(0), through: bounds.width, by: 128) {
+                grain.draw(in: NSRect(x: x, y: 0, width: 128, height: bounds.height),
+                           from: NSRect(x: 0, y: 0, width: 256, height: bounds.height * 2),
+                           operation: .sourceOver, fraction: 0.07)
+            }
+        }
+        NSColor(white: 1, alpha: 0.055).setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if draggable { window?.performDrag(with: event) }
+        else { super.mouseDown(with: event) }
+    }
+}
+
+@MainActor
+private final class ChromeIconButton: NSButton {
+    var emphasized = false { didSet { updateLook() } }
+    var isSelected = false { didSet { updateLook() } }
+    private var isHovering = false
+    private var hoverArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        title = ""
+        isBordered = false
+        imagePosition = .imageOnly
+        wantsLayer = true
+        layer?.cornerRadius = 3
+        updateLook()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func updateTrackingAreas() {
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovering = true; updateLook() }
+    override func mouseExited(with event: NSEvent) { isHovering = false; updateLook() }
+
+    private func updateLook() {
+        let selectedColor = emphasized
+            ? NSColor(srgbRed: 0.66, green: 0.73, blue: 0.62, alpha: 1)
+            : NSColor(white: 1, alpha: 0.12)
+        layer?.backgroundColor = (isSelected ? selectedColor : isHovering ? NSColor(white: 1, alpha: 0.09) : .clear).cgColor
+        contentTintColor = isSelected && emphasized ? NSColor(white: 0.10, alpha: 1) : NSColor(white: 0.83, alpha: 1)
     }
 }
 

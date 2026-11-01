@@ -27,18 +27,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        urls.forEach(open)
+        urls.forEach { open($0) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     @objc func openDocument(_ sender: Any?) {
+        let target = NSApp.keyWindow?.windowController as? ViewerWindowController
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf, UTType(filenameExtension: "djvu")!, UTType(filenameExtension: "djv")!]
         panel.allowsMultipleSelection = true
         panel.begin { [weak self] response in
             guard response == .OK else { return }
-            panel.urls.forEach { self?.open($0) }
+            panel.urls.forEach { self?.open($0, in: target) }
         }
     }
 
@@ -48,16 +49,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.showWindow(nil)
     }
 
-    func open(_ url: URL) {
+    func open(_ url: URL, in preferredWindow: ViewerWindowController? = nil) {
         guard url.isFileURL else { return }
-        if let existing = windows.first(where: { $0.documentURL == url }) {
+        if let existing = windows.first(where: { $0.containsDocument(url) }) {
+            existing.selectDocument(url)
             existing.showWindow(nil)
             existing.window?.makeKeyAndOrderFront(nil)
             return
         }
-        let controller = ViewerWindowController()
-        retain(controller)
+        let controller: ViewerWindowController
+        if let preferredWindow, windows.contains(where: { $0 === preferredWindow }) {
+            controller = preferredWindow
+        } else if let focused = NSApp.keyWindow?.windowController as? ViewerWindowController {
+            controller = focused
+        } else if let visible = windows.last(where: { $0.window?.isVisible == true }) {
+            controller = visible
+        } else {
+            controller = ViewerWindowController()
+            retain(controller)
+        }
         controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
         controller.loadDocument(url)
     }
 
@@ -85,7 +97,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         file.addItem(.separator())
         file.addItem(withTitle: "Print…", action: #selector(ViewerWindowController.printDocument(_:)), keyEquivalent: "p")
         file.addItem(.separator())
-        file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        file.addItem(withTitle: "Close Tab", action: #selector(ViewerWindowController.closeCurrentTab(_:)), keyEquivalent: "w")
+        let closeWindow = file.addItem(withTitle: "Close Window", action: #selector(ViewerWindowController.closeCurrentWindow(_:)), keyEquivalent: "w")
+        closeWindow.keyEquivalentModifierMask = [.command, .shift]
         fileItem.submenu = file
         main.addItem(fileItem)
 
@@ -111,6 +125,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.addItem(withTitle: "Fit Width", action: #selector(ViewerWindowController.fitWidth(_:)), keyEquivalent: "1")
         view.addItem(withTitle: "Fit Page", action: #selector(ViewerWindowController.fitPage(_:)), keyEquivalent: "2")
         view.addItem(.separator())
+        view.addItem(withTitle: "Pages", action: #selector(ViewerWindowController.showPages(_:)), keyEquivalent: "3")
+        view.addItem(withTitle: "Outline", action: #selector(ViewerWindowController.showOutline(_:)), keyEquivalent: "4")
+        view.addItem(.separator())
+        view.addItem(withTitle: "Continuous", action: #selector(ViewerWindowController.showContinuous(_:)), keyEquivalent: "5")
+        view.addItem(withTitle: "Two Page", action: #selector(ViewerWindowController.showTwoPage(_:)), keyEquivalent: "6")
+        view.addItem(.separator())
         view.addItem(withTitle: "Toggle Sidebar", action: #selector(ViewerWindowController.toggleSidebar(_:)), keyEquivalent: "s")
         viewItem.submenu = view
         main.addItem(viewItem)
@@ -118,6 +138,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(.separator())
+        let nextTab = windowMenu.addItem(withTitle: "Next Tab", action: #selector(ViewerWindowController.selectNextTab(_:)), keyEquivalent: "\t")
+        nextTab.keyEquivalentModifierMask = [.control]
+        let previousTab = windowMenu.addItem(withTitle: "Previous Tab", action: #selector(ViewerWindowController.selectPreviousTab(_:)), keyEquivalent: "\t")
+        previousTab.keyEquivalentModifierMask = [.control, .shift]
         windowItem.submenu = windowMenu
         main.addItem(windowItem)
         NSApp.windowsMenu = windowMenu

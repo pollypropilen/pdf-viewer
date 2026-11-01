@@ -5,7 +5,7 @@ A small, native PDF and DjVu viewer written in Swift with AppKit, PDFKit, and Dj
 ## Features in this edition
 
 - Open PDF, DjVu, and DjV files from the File menu, Finder, command line, or drag and drop.
-- Use a separate window for each document.
+- Open several PDF and DjVu documents as tabs in one window. The menu at the right of the tab strip lists every open document when tabs extend beyond the window. Switch tabs with Control-Tab or Control-Shift-Tab, close a tab with Command-W, and open a separate window with Command-N.
 - Navigate by page number, thumbnails, or document outline, including DjVu bookmarks.
 - Search PDF text with highlighted matches. Search a DjVu hidden text layer by page when one is present; image-only DjVu scans have no searchable text.
 - Switch between continuous and two-page reading, zoom, and fit the page or width. PDF files also support text selection, links, and printing.
@@ -13,7 +13,7 @@ A small, native PDF and DjVu viewer written in Swift with AppKit, PDFKit, and Dj
 
 The interface is English only. This edition is a viewer: it does not save changes to PDF files.
 
-The dark workspace, compact controls, left page strip, and footer follow the screenshots in `../KillerPDF-1.9.1/docs/`. The [KillerPDF 1.9.0 overview on Habr](https://habr.com/ru/news/1101878/) informed the capability split: page thumbnails, search, text selection, printing, and password prompts belong in the viewer; page reordering, annotations, signing, and direct text edits belong to the editor milestone. The [Foxit PDF Reader page](https://www.foxit.com/pdf-reader/) was a secondary reference for the reading workflow. Features listed on either site are not automatically implemented here.
+The dark workspace, textured title strip, compact icon toolbar, left page strip, and footer follow the screenshots in `../KillerPDF-1.9.1/docs/`. The document tabs below the toolbar follow the supplied Foxit Reader reference. Each tab keeps its page, zoom, reading mode, sidebar choice, and search results when switching documents. The toolbar groups file actions and page navigation on the left, and reading modes, sidebar, and search on the right. Hover over an icon for its English command name. Search opens in a compact popover. The title strip's grain texture comes from the KillerPDF source tree's `pdf-landing/grain.png` and is distributed under the same GPLv3 license. The [KillerPDF 1.9.0 overview on Habr](https://habr.com/ru/news/1101878/) informed the capability split: page thumbnails, search, text selection, printing, and password prompts belong in the viewer; page reordering, annotations, signing, and direct text edits belong to the editor milestone. The [Foxit PDF Reader page](https://www.foxit.com/pdf-reader/) was a secondary reference for the reading workflow. Features listed on either site are not automatically implemented here.
 
 ## Build
 
@@ -37,7 +37,7 @@ DjView4 4.12 is a Qt interface over DjVuLibre. Its source in `../djvu/djview4-4.
 
 | Windows capability | macOS edition 1 | Planned edition 2 |
 | --- | --- | --- |
-| Tabs and split panes | One native window per PDF | Evaluate tabs and compare view |
+| Tabs and split panes | Multiple PDF and DjVu tabs per native window | Evaluate split panes and compare view |
 | PDF rendering, navigation, outlines, search | PDFKit | Keep and validate against document corpus |
 | DjVu rendering, thumbnails, bookmarks, hidden-text page search | DjVuLibre and native UI | Improve text selection and search highlighting |
 | Annotations and forms | View only | Add markup, form filling, save as, undo |
